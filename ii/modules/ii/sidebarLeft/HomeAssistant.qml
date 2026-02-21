@@ -582,32 +582,113 @@ Item {
                 }
             }
 
-            // Colour swatches (quick preset hues)
+            // Colour picker (hue + saturation gradient strips)
             Loader {
                 active: bubble.showColor && bubble.isOn && bubble.entityData.supports_color
                 Layout.fillWidth: true
-                sourceComponent: Flow {
+                sourceComponent: ColumnLayout {
                     spacing: 5
-                    // 8 preset hues
-                    Repeater {
-                        model: [0, 30, 60, 120, 180, 210, 270, 320]
-                        delegate: Rectangle {
-                            required property int modelData
-                            // Highlight swatch when the light's current hue is within 20° of this preset
-                            readonly property int hueMatchTolerance: 20
-                            width: 24
-                            height: 24
-                            radius: width / 2
-                            color: Qt.hsla(modelData / 360, 0.85, 0.55, 1)
-                            border.width: (bubble.entityData.hs_color &&
-                                Math.abs(bubble.entityData.hs_color[0] - modelData) < hueMatchTolerance)
-                                ? 2 : 0
-                            border.color: Appearance.colors.colOnLayer0
 
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: bubble.colorRequested(parent.modelData, 85)
+                    // Hue strip
+                    Rectangle {
+                        id: hueStrip
+                        Layout.fillWidth: true
+                        height: 14
+                        radius: height / 2
+                        clip: true
+
+                        // Local drag state (0–1); syncs from entityData when not dragging
+                        property real hue: bubble.entityData.hs_color
+                            ? bubble.entityData.hs_color[0] / 360
+                            : 0
+
+                        gradient: Gradient {
+                            orientation: Gradient.Horizontal
+                            GradientStop { position: 0/6; color: Qt.hsla(0/6, 1, 0.5, 1) }
+                            GradientStop { position: 1/6; color: Qt.hsla(1/6, 1, 0.5, 1) }
+                            GradientStop { position: 2/6; color: Qt.hsla(2/6, 1, 0.5, 1) }
+                            GradientStop { position: 3/6; color: Qt.hsla(3/6, 1, 0.5, 1) }
+                            GradientStop { position: 4/6; color: Qt.hsla(4/6, 1, 0.5, 1) }
+                            GradientStop { position: 5/6; color: Qt.hsla(5/6, 1, 0.5, 1) }
+                            GradientStop { position: 6/6; color: Qt.hsla(0, 1, 0.5, 1) }
+                        }
+
+                        // Handle
+                        Rectangle {
+                            x: Math.max(0, Math.min(hueStrip.width - width, hueStrip.hue * hueStrip.width - width / 2))
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 6
+                            height: parent.height + 4
+                            radius: Appearance.rounding.full
+                            color: "white"
+                            border.width: 1.5
+                            border.color: Qt.rgba(0, 0, 0, 0.4)
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            function applyX(x) {
+                                hueStrip.hue = Math.max(0, Math.min(1, x / hueStrip.width));
+                            }
+                            onPressed:          (e) => applyX(e.x)
+                            onPositionChanged:  (e) => { if (pressed) applyX(e.x) }
+                            onReleased: {
+                                bubble.colorRequested(
+                                    Math.round(hueStrip.hue * 360),
+                                    bubble.entityData.hs_color ? bubble.entityData.hs_color[1] : 85
+                                );
+                            }
+                        }
+                    }
+
+                    // Saturation strip
+                    Rectangle {
+                        id: satStrip
+                        Layout.fillWidth: true
+                        height: 14
+                        radius: height / 2
+                        clip: true
+
+                        // Local drag state (0–1); syncs from entityData when not dragging
+                        property real sat: bubble.entityData.hs_color
+                            ? bubble.entityData.hs_color[1] / 100
+                            : 0.85
+                        readonly property real hue: bubble.entityData.hs_color
+                            ? bubble.entityData.hs_color[0] / 360
+                            : hueStrip.hue
+
+                        gradient: Gradient {
+                            orientation: Gradient.Horizontal
+                            GradientStop { position: 0.0; color: Qt.hsla(satStrip.hue, 0,    0.8, 1) }
+                            GradientStop { position: 1.0; color: Qt.hsla(satStrip.hue, 1,    0.5, 1) }
+                        }
+
+                        // Handle
+                        Rectangle {
+                            x: Math.max(0, Math.min(satStrip.width - width, satStrip.sat * satStrip.width - width / 2))
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 6
+                            height: parent.height + 4
+                            radius: Appearance.rounding.full
+                            color: "white"
+                            border.width: 1.5
+                            border.color: Qt.rgba(0, 0, 0, 0.4)
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            function applyX(x) {
+                                satStrip.sat = Math.max(0, Math.min(1, x / satStrip.width));
+                            }
+                            onPressed:          (e) => applyX(e.x)
+                            onPositionChanged:  (e) => { if (pressed) applyX(e.x) }
+                            onReleased: {
+                                bubble.colorRequested(
+                                    bubble.entityData.hs_color ? bubble.entityData.hs_color[0] : Math.round(hueStrip.hue * 360),
+                                    Math.round(satStrip.sat * 100)
+                                );
                             }
                         }
                     }

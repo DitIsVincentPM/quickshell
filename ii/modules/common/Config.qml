@@ -515,7 +515,11 @@ Singleton {
                     property int pollInterval: 5000 // Interval in ms to refresh entity states
                     property list<string> lightEntities: [] // Leave empty to auto-discover all lights
                     property list<string> cameraEntities: [] // Leave empty to auto-discover all cameras
+                    property list<string> climateEntities: [] // Leave empty to auto-discover all climate/heater entities
+                    property bool showClimate: true // Show heater/climate cards at the top
                     property list<string> visibleEntities: [] // IDs shown in the tab (empty = show all)
+                    property list<string> entityOrder: [] // Custom display order of entity IDs (empty = alphabetical)
+                    property list<var> entityGroups: [] // Groups: [{name: "Office", entities: ["light.x"]}]
                     property bool showBrightness: true // Show brightness slider on light cards
                     property bool showColor: true // Show colour picker on light cards
                     property bool showCameras: true // Show camera feeds section

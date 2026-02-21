@@ -32,6 +32,53 @@ Item {
     // Derived: only the entities the user chose to show (empty visibleEntities = show all)
     property var visibleEntities: Config.options.sidebar.homeAssistant.visibleEntities
 
+    // Lights sorted by entityOrder config (falls back to alphabetical)
+    readonly property var orderedLights: {
+        var order = Config.options.sidebar.homeAssistant.entityOrder;
+        var lights = root.allLights.slice();
+        if (order.length === 0) return lights;
+        lights.sort(function(a, b) {
+            var ai = order.indexOf(a.entity_id);
+            var bi = order.indexOf(b.entity_id);
+            if (ai === -1) ai = 1e9;
+            if (bi === -1) bi = 1e9;
+            if (ai !== bi) return ai - bi;
+            return a.friendly_name.localeCompare(b.friendly_name);
+        });
+        return lights;
+    }
+
+    // Sections for the normal view: either one section per configured group + one "Other"
+    // section for ungrouped lights, or a single unnamed section with all lights.
+    readonly property var lightSections: {
+        var groups = Config.options.sidebar.homeAssistant.entityGroups;
+        var lights = root.orderedLights;
+        if (!groups || groups.length === 0) {
+            return [{ name: "", lights: lights }];
+        }
+        var used = {};
+        var sections = [];
+        for (var g = 0; g < groups.length; g++) {
+            var grp = groups[g];
+            var grpLights = [];
+            for (var e = 0; e < (grp.entities || []).length; e++) {
+                var eid = grp.entities[e];
+                used[eid] = true;
+                for (var li = 0; li < lights.length; li++) {
+                    if (lights[li].entity_id === eid) { grpLights.push(lights[li]); break; }
+                }
+            }
+            sections.push({ name: grp.name || "", lights: grpLights });
+        }
+        // Ungrouped lights
+        var others = [];
+        for (var li2 = 0; li2 < lights.length; li2++) {
+            if (!used[lights[li2].entity_id]) others.push(lights[li2]);
+        }
+        if (others.length > 0) sections.push({ name: qsTr("Other"), lights: others });
+        return sections;
+    }
+
     function isEntityVisible(eid) {
         if (root.visibleEntities.length === 0) return true;
         return root.visibleEntities.indexOf(eid) !== -1;
@@ -139,7 +186,7 @@ Item {
 
     /** Toggle a light entity on/off. */
     function toggleLight(entityId, currentState) {
-        // Optimistic update
+        // Optimistic update – keep new state immediately; poll timer will sync later
         var newState = (currentState === "on") ? "off" : "on";
         var updated = root.allLights.slice();
         for (var i = 0; i < updated.length; i++) {
@@ -151,7 +198,6 @@ Item {
             }
         }
         root.allLights = updated;
-        // Then actually call HA
         var xhr = new XMLHttpRequest();
         var svc = (currentState === "on") ? "turn_off" : "turn_on";
         xhr.open("POST", root.apiUrl("/services/light/" + svc));
@@ -159,8 +205,8 @@ Item {
         xhr.setRequestHeader("Content-Type", "application/json");
         xhr.onreadystatechange = function() {
             if (xhr.readyState === XMLHttpRequest.DONE) {
-                if (xhr.status === 200 || xhr.status === 201) root.fetchStates();
-                else root.errorMessage = qsTr("Failed to control light (HTTP %1).").arg(xhr.status);
+                if (xhr.status !== 200 && xhr.status !== 201)
+                    root.errorMessage = qsTr("Failed to control light (HTTP %1).").arg(xhr.status);
             }
         };
         xhr.send(JSON.stringify({ entity_id: entityId }));
@@ -183,10 +229,6 @@ Item {
         xhr.open("POST", root.apiUrl("/services/light/turn_on"));
         xhr.setRequestHeader("Authorization", root.authHeader());
         xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState === XMLHttpRequest.DONE && (xhr.status === 200 || xhr.status === 201))
-                root.fetchStates();
-        };
         xhr.send(JSON.stringify({ entity_id: entityId, brightness_pct: pct }));
     }
 
@@ -207,11 +249,27 @@ Item {
         xhr.open("POST", root.apiUrl("/services/light/turn_on"));
         xhr.setRequestHeader("Authorization", root.authHeader());
         xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState === XMLHttpRequest.DONE && (xhr.status === 200 || xhr.status === 201))
-                root.fetchStates();
-        };
         xhr.send(JSON.stringify({ entity_id: entityId, hs_color: [hue, sat] }));
+    }
+
+    /** Move an entity up/down in the custom order. */
+    function moveEntity(entityId, direction) {
+        var order = Config.options.sidebar.homeAssistant.entityOrder.slice();
+        // Seed order from lights only (cameras are not reorderable)
+        if (order.length === 0) {
+            order = root.allLights.map(function(e) { return e.entity_id; });
+        }
+        var idx = order.indexOf(entityId);
+        if (idx === -1) {
+            order.push(entityId);
+            idx = order.length - 1;
+        }
+        var newIdx = idx + direction;
+        if (newIdx < 0 || newIdx >= order.length) return;
+        var tmp = order[idx];
+        order[idx] = order[newIdx];
+        order[newIdx] = tmp;
+        Config.options.sidebar.homeAssistant.entityOrder = order;
     }
 
     // -----------------------------------------------------------------------
@@ -328,9 +386,9 @@ Item {
                 width: parent.width
                 spacing: root.padding
 
-                // ── EDIT MODE: list all entities with visibility toggles ──
+                // ── EDIT MODE: list all entities with visibility toggles + reorder ──
                 Repeater {
-                    model: root.editMode ? root.allLights.concat(root.allCameras) : []
+                    model: root.editMode ? root.orderedLights.concat(root.allCameras) : []
                     delegate: Rectangle {
                         id: editRow
                         required property var modelData
@@ -350,6 +408,37 @@ Item {
                                 margins: 10
                             }
                             spacing: 8
+
+                            // Up / Down reorder buttons (lights only)
+                            ColumnLayout {
+                                visible: editRow.modelData.entity_id.startsWith("light.")
+                                spacing: 0
+                                RippleButton {
+                                    implicitWidth: 22
+                                    implicitHeight: 18
+                                    buttonRadius: Appearance.rounding.small
+                                    onClicked: root.moveEntity(editRow.modelData.entity_id, -1)
+                                    contentItem: MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: "arrow_drop_up"
+                                        iconSize: Appearance.font.pixelSize.normal
+                                        color: Appearance.colors.colSubtext
+                                    }
+                                }
+                                RippleButton {
+                                    implicitWidth: 22
+                                    implicitHeight: 18
+                                    buttonRadius: Appearance.rounding.small
+                                    onClicked: root.moveEntity(editRow.modelData.entity_id, 1)
+                                    contentItem: MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: "arrow_drop_down"
+                                        iconSize: Appearance.font.pixelSize.normal
+                                        color: Appearance.colors.colSubtext
+                                    }
+                                }
+                            }
+
                             MaterialSymbol {
                                 text: editRow.modelData.entity_id.startsWith("light.") ? "lightbulb" : "videocam"
                                 iconSize: Appearance.font.pixelSize.larger
@@ -369,95 +458,112 @@ Item {
                     }
                 }
 
-                // ── NORMAL MODE: Lights as bubbles ───────────────────────
-                GridLayout {
-                    Layout.fillWidth: true
-                    columns: 2
-                    columnSpacing: root.padding
-                    rowSpacing: root.padding
+                // ── NORMAL MODE: Lights grouped by section ───────────────────────
+                Repeater {
+                    model: root.editMode ? [] : root.lightSections
+                    delegate: ColumnLayout {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        spacing: root.padding / 2
 
-                    Repeater {
-                        model: root.editMode ? [] : root.allLights
-                        delegate: LightBubble {
-                            required property var modelData
+                        // Group header (only shown when name is non-empty)
+                        StyledText {
+                            visible: modelData.name.length > 0
+                            text: modelData.name
+                            font.pixelSize: Appearance.font.pixelSize.small
+                            color: Appearance.colors.colSubtext
+                            Layout.topMargin: root.padding / 2
+                        }
+
+                        GridLayout {
                             Layout.fillWidth: true
-                            entityData: modelData
-                            showBrightness: root.cfgShowBrightness
-                            showColor: root.cfgShowColor
-                            visible: root.isEntityVisible(modelData.entity_id)
-                            onToggleRequested: root.toggleLight(modelData.entity_id, modelData.state)
-                            onBrightnessRequested: (pct) => root.setLightBrightness(modelData.entity_id, pct)
-                            onColorRequested: (h, s) => root.setLightColor(modelData.entity_id, h, s)
+                            columns: 2
+                            columnSpacing: root.padding / 2
+                            rowSpacing: root.padding / 2
+
+                            Repeater {
+                                // Only include visible entities so hidden ones don't create empty grid cells
+                                model: modelData.lights.filter(function(e) { return root.isEntityVisible(e.entity_id); })
+                                delegate: LightBubble {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignTop
+                                    entityData: modelData
+                                    showBrightness: root.cfgShowBrightness
+                                    showColor: root.cfgShowColor
+                                    onToggleRequested: root.toggleLight(modelData.entity_id, modelData.state)
+                                    onBrightnessRequested: (pct) => root.setLightBrightness(modelData.entity_id, pct)
+                                    onColorRequested: (h, s) => root.setLightColor(modelData.entity_id, h, s)
+                                }
+                            }
                         }
                     }
                 }
 
                 // ── NORMAL MODE: Cameras ─────────────────────────────────
-                Loader {
-                    active: !root.editMode && root.cfgShowCameras && root.allCameras.length > 0
+                ColumnLayout {
+                    visible: !root.editMode && root.cfgShowCameras && root.allCameras.length > 0
                     Layout.fillWidth: true
-                    sourceComponent: ColumnLayout {
-                        width: parent ? parent.width : 0
-                        spacing: root.padding
+                    spacing: root.padding
 
-                        StyledText {
-                            text: qsTr("Cameras")
-                            font.pixelSize: Appearance.font.pixelSize.normal
-                            color: Appearance.colors.colOnLayer1
-                        }
+                    StyledText {
+                        text: qsTr("Cameras")
+                        font.pixelSize: Appearance.font.pixelSize.normal
+                        color: Appearance.colors.colOnLayer1
+                    }
 
-                        Repeater {
-                            model: root.allCameras
-                            delegate: ColumnLayout {
-                                id: camDelegate
-                                required property var modelData
+                    Repeater {
+                        model: root.allCameras
+                        delegate: ColumnLayout {
+                            id: camDelegate
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 4
+                            visible: root.isEntityVisible(camDelegate.modelData.entity_id)
+
+                            StyledText {
+                                text: camDelegate.modelData.friendly_name
+                                color: Appearance.colors.colSubtext
+                                font.pixelSize: Appearance.font.pixelSize.small
+                            }
+
+                            Rectangle {
                                 Layout.fillWidth: true
-                                spacing: 4
-                                visible: root.isEntityVisible(camDelegate.modelData.entity_id)
+                                implicitHeight: width * 9 / 16
+                                radius: Appearance.rounding.small
+                                color: Appearance.colors.colLayer2
+                                clip: true
 
-                                StyledText {
-                                    text: camDelegate.modelData.friendly_name
-                                    color: Appearance.colors.colSubtext
-                                    font.pixelSize: Appearance.font.pixelSize.small
-                                }
+                                Image {
+                                    id: camImage
+                                    anchors.fill: parent
+                                    fillMode: Image.PreserveAspectCrop
+                                    cache: false
+                                    asynchronous: true
+                                    // Use access_token query param – supported by HA camera_proxy
+                                    source: root.haToken.length > 0 && root.isEntityVisible(camDelegate.modelData.entity_id)
+                                        ? root.cameraProxyUrl(camDelegate.modelData.entity_id)
+                                        : ""
 
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    implicitHeight: width * 9 / 16
-                                    radius: Appearance.rounding.small
-                                    color: Appearance.colors.colLayer2
-                                    clip: true
-
-                                    Image {
-                                        id: camImage
-                                        anchors.fill: parent
-                                        fillMode: Image.PreserveAspectCrop
-                                        cache: false
-                                        asynchronous: true
-                                        source: root.haToken.length > 0
-                                            ? root.cameraProxyUrl(camDelegate.modelData.entity_id)
-                                            : ""
-
-                                        Timer {
-                                            interval: Config.options.sidebar.homeAssistant.pollInterval
-                                            running: root.haToken.length > 0 && camImage.visible
-                                            repeat: true
-                                            onTriggered: {
-                                                var u = root.cameraProxyUrl(camDelegate.modelData.entity_id);
-                                                camImage.source = "";
-                                                camImage.source = u;
-                                            }
+                                    Timer {
+                                        interval: Config.options.sidebar.homeAssistant.pollInterval
+                                        running: root.haToken.length > 0 && root.isEntityVisible(camDelegate.modelData.entity_id)
+                                        repeat: true
+                                        onTriggered: {
+                                            var u = root.cameraProxyUrl(camDelegate.modelData.entity_id);
+                                            camImage.source = "";
+                                            camImage.source = u;
                                         }
                                     }
+                                }
 
-                                    StyledText {
-                                        anchors.centerIn: parent
-                                        visible: camImage.status !== Image.Ready
-                                        text: camImage.status === Image.Loading
-                                            ? qsTr("Loading…")
-                                            : qsTr("No feed")
-                                        color: Appearance.colors.colSubtext
-                                    }
+                                StyledText {
+                                    anchors.centerIn: parent
+                                    visible: camImage.status !== Image.Ready
+                                    text: camImage.status === Image.Loading
+                                        ? qsTr("Loading…")
+                                        : qsTr("No feed")
+                                    color: Appearance.colors.colSubtext
                                 }
                             }
                         }

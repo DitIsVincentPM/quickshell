@@ -30,7 +30,7 @@ Item {
     property bool loading: false
 
     // Derived: only the entities the user chose to show (empty visibleEntities = show all)
-    readonly property var visibleEntities: Config.options.sidebar.homeAssistant.visibleEntities
+    property var visibleEntities: Config.options.sidebar.homeAssistant.visibleEntities
 
     function isEntityVisible(eid) {
         if (root.visibleEntities.length === 0) return true;
@@ -38,12 +38,15 @@ Item {
     }
 
     function setEntityVisible(eid, visible) {
-        var current = root.visibleEntities.slice();
-        var idx = current.indexOf(eid);
-        if (visible && idx === -1) {
-            current.push(eid);
-        } else if (!visible && idx !== -1) {
-            current.splice(idx, 1);
+        var current = Config.options.sidebar.homeAssistant.visibleEntities.slice();
+        // If list is empty = "show all", seed it with everything minus the one being hidden
+        if (current.length === 0 && !visible) {
+            var all = root.allLights.concat(root.allCameras).map(function(e){ return e.entity_id; });
+            current = all.filter(function(id){ return id !== eid; });
+        } else {
+            var idx = current.indexOf(eid);
+            if (visible && idx === -1) current.push(eid);
+            else if (!visible && idx !== -1) current.splice(idx, 1);
         }
         Config.options.sidebar.homeAssistant.visibleEntities = current;
     }
@@ -136,9 +139,22 @@ Item {
 
     /** Toggle a light entity on/off. */
     function toggleLight(entityId, currentState) {
-        var service = (currentState === "on") ? "turn_off" : "turn_on";
+        // Optimistic update
+        var newState = (currentState === "on") ? "off" : "on";
+        var updated = root.allLights.slice();
+        for (var i = 0; i < updated.length; i++) {
+            if (updated[i].entity_id === entityId) {
+                var copy = Object.assign({}, updated[i]);
+                copy.state = newState;
+                updated[i] = copy;
+                break;
+            }
+        }
+        root.allLights = updated;
+        // Then actually call HA
         var xhr = new XMLHttpRequest();
-        xhr.open("POST", root.apiUrl("/services/light/" + service));
+        var svc = (currentState === "on") ? "turn_off" : "turn_on";
+        xhr.open("POST", root.apiUrl("/services/light/" + svc));
         xhr.setRequestHeader("Authorization", root.authHeader());
         xhr.setRequestHeader("Content-Type", "application/json");
         xhr.onreadystatechange = function() {
@@ -152,6 +168,17 @@ Item {
 
     /** Set brightness for a light (0–100). */
     function setLightBrightness(entityId, pct) {
+        // Optimistic update
+        var updated = root.allLights.slice();
+        for (var i = 0; i < updated.length; i++) {
+            if (updated[i].entity_id === entityId) {
+                var copy = Object.assign({}, updated[i]);
+                copy.brightness = pct;
+                updated[i] = copy;
+                break;
+            }
+        }
+        root.allLights = updated;
         var xhr = new XMLHttpRequest();
         xhr.open("POST", root.apiUrl("/services/light/turn_on"));
         xhr.setRequestHeader("Authorization", root.authHeader());
@@ -165,6 +192,17 @@ Item {
 
     /** Set hue/saturation colour for a light (hue 0-360, sat 0-100). */
     function setLightColor(entityId, hue, sat) {
+        // Optimistic update
+        var updated = root.allLights.slice();
+        for (var i = 0; i < updated.length; i++) {
+            if (updated[i].entity_id === entityId) {
+                var copy = Object.assign({}, updated[i]);
+                copy.hs_color = [hue, sat];
+                updated[i] = copy;
+                break;
+            }
+        }
+        root.allLights = updated;
         var xhr = new XMLHttpRequest();
         xhr.open("POST", root.apiUrl("/services/light/turn_on"));
         xhr.setRequestHeader("Authorization", root.authHeader());
@@ -257,11 +295,15 @@ Item {
 
         // ── Loading ───────────────────────────────────────────────────────
         StyledText {
-            visible: root.loading && root.errorMessage.length === 0
+            id: loadingText
             Layout.fillWidth: true
+            opacity: (root.loading && root.errorMessage.length === 0) ? 1.0 : 0.0
             horizontalAlignment: Text.AlignHCenter
-            text: qsTr("Loading…")
+            text: qsTr("Fetching…")
             color: Appearance.colors.colSubtext
+            Behavior on opacity {
+                NumberAnimation { duration: 150 }
+            }
         }
 
         // ── Token not set ─────────────────────────────────────────────────
@@ -328,18 +370,25 @@ Item {
                 }
 
                 // ── NORMAL MODE: Lights as bubbles ───────────────────────
-                Repeater {
-                    model: root.editMode ? [] : root.allLights
-                    delegate: LightBubble {
-                        required property var modelData
-                        Layout.fillWidth: true
-                        entityData: modelData
-                        showBrightness: root.cfgShowBrightness
-                        showColor: root.cfgShowColor
-                        visible: root.isEntityVisible(modelData.entity_id)
-                        onToggleRequested: root.toggleLight(modelData.entity_id, modelData.state)
-                        onBrightnessRequested: (pct) => root.setLightBrightness(modelData.entity_id, pct)
-                        onColorRequested: (h, s) => root.setLightColor(modelData.entity_id, h, s)
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: 2
+                    columnSpacing: root.padding
+                    rowSpacing: root.padding
+
+                    Repeater {
+                        model: root.editMode ? [] : root.allLights
+                        delegate: LightBubble {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            entityData: modelData
+                            showBrightness: root.cfgShowBrightness
+                            showColor: root.cfgShowColor
+                            visible: root.isEntityVisible(modelData.entity_id)
+                            onToggleRequested: root.toggleLight(modelData.entity_id, modelData.state)
+                            onBrightnessRequested: (pct) => root.setLightBrightness(modelData.entity_id, pct)
+                            onColorRequested: (h, s) => root.setLightColor(modelData.entity_id, h, s)
+                        }
                     }
                 }
 
@@ -464,9 +513,9 @@ Item {
                 left: parent.left
                 right: parent.right
                 verticalCenter: parent.verticalCenter
-                margins: 12
+                margins: 8
             }
-            spacing: 8
+            spacing: 6
 
             // Top row: icon  name  brightness%  switch
             RowLayout {
@@ -537,13 +586,8 @@ Item {
             Loader {
                 active: bubble.showColor && bubble.isOn && bubble.entityData.supports_color
                 Layout.fillWidth: true
-                sourceComponent: RowLayout {
-                    spacing: 6
-                    MaterialSymbol {
-                        text: "palette"
-                        iconSize: Appearance.font.pixelSize.small
-                        color: Appearance.colors.colSubtext
-                    }
+                sourceComponent: Flow {
+                    spacing: 5
                     // 8 preset hues
                     Repeater {
                         model: [0, 30, 60, 120, 180, 210, 270, 320]
@@ -551,14 +595,14 @@ Item {
                             required property int modelData
                             // Highlight swatch when the light's current hue is within 20° of this preset
                             readonly property int hueMatchTolerance: 20
-                            implicitWidth: 18
-                            implicitHeight: 18
-                            radius: Appearance.rounding.full
+                            width: 24
+                            height: 24
+                            radius: width / 2
                             color: Qt.hsla(modelData / 360, 0.85, 0.55, 1)
                             border.width: (bubble.entityData.hs_color &&
                                 Math.abs(bubble.entityData.hs_color[0] - modelData) < hueMatchTolerance)
                                 ? 2 : 0
-                            border.color: Appearance.colors.colPrimary
+                            border.color: Appearance.colors.colOnLayer0
 
                             MouseArea {
                                 anchors.fill: parent

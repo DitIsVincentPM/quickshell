@@ -512,7 +512,7 @@ Singleton {
                     property bool enable: true
                     property string url: "https://homeassistant.vincentvanhoof.be"
                     property string token: "" // Long-lived access token
-                    property int pollInterval: 10000 // Interval in ms to refresh entity states
+                    property int pollInterval: 5000 // Interval in ms to refresh entity states
                     property list<string> lightEntities: [] // Leave empty to auto-discover all lights
                     property list<string> cameraEntities: [] // Leave empty to auto-discover all cameras
                     property list<string> visibleEntities: [] // IDs shown in the tab (empty = show all)

@@ -3,6 +3,7 @@ import qs.modules.common.widgets
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtWebSockets
 
 /**
  * Home Assistant sidebar tab.
@@ -167,7 +168,8 @@ Item {
                             if (cfgCams.length === 0 || cfgCams.indexOf(eid) !== -1) {
                                 cameras.push({
                                     entity_id: eid,
-                                    friendly_name: attrs.friendly_name || eid
+                                    friendly_name: attrs.friendly_name || eid,
+                                    state: entity.state
                                 });
                             }
                         } else if (eid.startsWith("climate.")) {
@@ -362,6 +364,66 @@ Item {
 
     onHaTokenChanged: { if (root.haToken.length > 0) root.fetchStates(); }
     onHaUrlChanged:   { if (root.haToken.length > 0) root.fetchStates(); }
+
+    // -----------------------------------------------------------------------
+    // HA WebSocket – used to obtain short-lived signed camera URLs via
+    // the auth/sign_path API (the same mechanism the Lovelace dashboard uses).
+    // Modern HA no longer accepts ?access_token= for camera_proxy; signed
+    // paths (?authSig=…) are the supported authentication method.
+    // -----------------------------------------------------------------------
+    WebSocket {
+        id: haWs
+        // Convert http(s):// → ws(s)://
+        url: root.haUrl.replace(/^http(s?):\/\//, "ws$1://").replace(/\/$/, "") + "/api/websocket"
+        active: root.haToken.length > 0 && root.haUrl.length > 0
+
+        property int nextMsgId: 1
+        property var pendingCallbacks: ({})
+        property bool wsReady: false
+
+        onTextMessageReceived: function(msg) {
+            var m = JSON.parse(msg);
+            if (m.type === "auth_required") {
+                haWs.sendTextMessage(JSON.stringify({
+                    type: "auth",
+                    access_token: root.haToken
+                }));
+            } else if (m.type === "auth_ok") {
+                haWs.wsReady = true;
+            } else if (m.type === "auth_invalid") {
+                haWs.wsReady = false;
+                root.errorMessage = qsTr("WebSocket auth failed – check your access token.");
+            } else if (m.type === "result" && m.id !== undefined) {
+                var cb = haWs.pendingCallbacks[m.id];
+                if (cb !== undefined) {
+                    delete haWs.pendingCallbacks[m.id];
+                    cb(m.success ? m.result : null);
+                }
+            }
+        }
+
+        onStatusChanged: {
+            if (status === WebSocket.Closed || status === WebSocket.Error) {
+                haWs.wsReady = false;
+            }
+        }
+
+        /** Request a signed path token from HA. callback(result|null). */
+        function signPath(path, callback) {
+            if (!haWs.wsReady) {
+                callback(null);
+                return;
+            }
+            var id = haWs.nextMsgId++;
+            haWs.pendingCallbacks[id] = callback;
+            haWs.sendTextMessage(JSON.stringify({
+                id: id,
+                type: "auth/sign_path",
+                path: path,
+                expires: 30
+            }));
+        }
+    }
 
     // -----------------------------------------------------------------------
     // UI
@@ -614,6 +676,62 @@ Item {
                             spacing: 4
                             visible: root.isEntityVisible(camDelegate.modelData.entity_id)
 
+                            // True whenever we have everything needed to load an image.
+                            property bool shouldLoad: root.haToken.length > 0
+                                && root.isEntityVisible(camDelegate.modelData.entity_id)
+
+                            // Load (or reload) the camera image. Uses a HA WebSocket
+                            // signed-path token (?authSig=…) so the request is
+                            // authenticated without exposing the long-lived token in the
+                            // URL. Falls back to ?access_token= while the WS connects.
+                            function loadCameraImage() {
+                                if (!camDelegate.shouldLoad) return;
+                                var entityId = camDelegate.modelData.entity_id;
+                                if (haWs.wsReady) {
+                                    haWs.signPath("/api/camera_proxy/" + entityId, function(result) {
+                                        if (result && result.path) {
+                                            // Setting source to "" first forces QML to reload
+                                            // even when the new URL has the same base path.
+                                            camImage.source = "";
+                                            camImage.source = root.haUrl.replace(/\/$/, "") + result.path;
+                                        } else {
+                                            // signPath failed; retry after interval
+                                            cameraRefreshTimer.restart();
+                                        }
+                                    });
+                                } else {
+                                    // WS not yet ready – fall back to access_token query param.
+                                    // The Connections block below will upgrade to a signed URL
+                                    // once the WebSocket authenticates.
+                                    if (camImage.status !== Image.Loading) {
+                                        camImage.source = "";
+                                        camImage.source = root.cameraProxyUrl(entityId);
+                                    }
+                                }
+                            }
+
+                            Component.onCompleted: camDelegate.loadCameraImage()
+
+                            onShouldLoadChanged: {
+                                if (camDelegate.shouldLoad) camDelegate.loadCameraImage();
+                            }
+
+                            // When WS becomes ready, reload so we switch from the
+                            // access_token fallback to a proper signed URL.
+                            Connections {
+                                target: haWs
+                                function onWsReadyChanged() {
+                                    if (haWs.wsReady) {
+                                        // Upgrade to signed URL regardless of current status;
+                                        // only skip if a load is already in progress to avoid
+                                        // cancelling the ongoing request.
+                                        if (camImage.status !== Image.Loading) {
+                                            camDelegate.loadCameraImage();
+                                        }
+                                    }
+                                }
+                            }
+
                             StyledText {
                                 text: camDelegate.modelData.friendly_name
                                 color: Appearance.colors.colSubtext
@@ -633,19 +751,16 @@ Item {
                                     fillMode: Image.PreserveAspectCrop
                                     cache: false
                                     asynchronous: true
-                                    // Use access_token query param – supported by HA camera_proxy
-                                    source: root.haToken.length > 0 && root.isEntityVisible(camDelegate.modelData.entity_id)
-                                        ? root.cameraProxyUrl(camDelegate.modelData.entity_id)
-                                        : ""
 
-                                    Timer {
-                                        interval: Config.options.sidebar.homeAssistant.pollInterval
-                                        running: root.haToken.length > 0 && root.isEntityVisible(camDelegate.modelData.entity_id)
-                                        repeat: true
-                                        onTriggered: {
-                                            var u = root.cameraProxyUrl(camDelegate.modelData.entity_id);
-                                            camImage.source = "";
-                                            camImage.source = u;
+                                    // After each load (success or failure) wait
+                                    // cameraPollInterval ms before the next one. This
+                                    // one-shot pattern prevents the previous approach
+                                    // where a repeat timer would cancel slow in-progress
+                                    // requests (Tuya cameras can take several seconds).
+                                    onStatusChanged: {
+                                        if ((status === Image.Ready || status === Image.Error)
+                                                && camDelegate.shouldLoad) {
+                                            cameraRefreshTimer.restart();
                                         }
                                     }
                                 }
@@ -655,9 +770,21 @@ Item {
                                     visible: camImage.status !== Image.Ready
                                     text: camImage.status === Image.Loading
                                         ? qsTr("Loading…")
-                                        : qsTr("No feed")
+                                        : camDelegate.modelData.state === "unavailable"
+                                            ? qsTr("Offline")
+                                            : qsTr("No feed")
                                     color: Appearance.colors.colSubtext
                                 }
+                            }
+
+                            // One-shot timer: fires cameraPollInterval ms after the
+                            // previous load completes, never during an active request.
+                            Timer {
+                                id: cameraRefreshTimer
+                                interval: Config.options.sidebar.homeAssistant.cameraPollInterval
+                                running: false
+                                repeat: false
+                                onTriggered: camDelegate.loadCameraImage()
                             }
                         }
                     }

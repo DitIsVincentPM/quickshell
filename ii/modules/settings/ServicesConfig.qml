@@ -252,6 +252,18 @@ ContentPage {
             }
         }
 
+        ConfigSpinBox {
+            icon: "videocam"
+            text: Translation.tr("Camera refresh interval (ms)")
+            value: Config.options.sidebar.homeAssistant.cameraPollInterval
+            from: 2000
+            to: 60000
+            stepSize: 1000
+            onValueChanged: {
+                Config.options.sidebar.homeAssistant.cameraPollInterval = value;
+            }
+        }
+
         ConfigSwitch {
             buttonIcon: "brightness_medium"
             text: Translation.tr("Show brightness slider on light cards")

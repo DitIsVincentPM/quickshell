@@ -16,10 +16,12 @@ Item {
     property bool translatorEnabled: Config.options.sidebar.translator.enable
     property bool animeEnabled: Config.options.policies.weeb !== 0
     property bool animeCloset: Config.options.policies.weeb === 2
+    property bool homeAssistantEnabled: Config.options.sidebar.homeAssistant.enable
     property var tabButtonList: [
         ...(root.aiChatEnabled ? [{"icon": "neurology", "name": Translation.tr("Intelligence")}] : []),
         ...(root.translatorEnabled ? [{"icon": "translate", "name": Translation.tr("Translator")}] : []),
-        ...((root.animeEnabled && !root.animeCloset) ? [{"icon": "bookmark_heart", "name": Translation.tr("Anime")}] : [])
+        ...((root.animeEnabled && !root.animeCloset) ? [{"icon": "bookmark_heart", "name": Translation.tr("Anime")}] : []),
+        ...(root.homeAssistantEnabled ? [{"icon": "home", "name": Translation.tr("Home")}] : [])
     ]
     property int tabCount: swipeView.count
 
@@ -86,8 +88,10 @@ Item {
                 contentChildren: [
                     ...(root.aiChatEnabled ? [aiChat.createObject()] : []),
                     ...(root.translatorEnabled ? [translator.createObject()] : []),
-                    ...((root.tabButtonList.length === 0 || (!root.aiChatEnabled && !root.translatorEnabled && root.animeCloset)) ? [placeholder.createObject()] : []),
-                    ...(root.animeEnabled ? [anime.createObject()] : []),
+                    ...(root.tabButtonList.length === 0 ? [placeholder.createObject()] : []),
+                    ...((root.animeEnabled && !root.animeCloset) ? [anime.createObject()] : []),
+                    ...(root.homeAssistantEnabled ? [homeAssistant.createObject()] : []),
+                    ...(root.animeEnabled && root.animeCloset ? [anime.createObject()] : []),
                 ]
             }
         }
@@ -103,6 +107,10 @@ Item {
         Component {
             id: anime
             Anime {}
+        }
+        Component {
+            id: homeAssistant
+            HomeAssistant {}
         }
         Component {
             id: placeholder

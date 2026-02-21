@@ -204,6 +204,56 @@ ContentPage {
     }
 
     ContentSection {
+        icon: "home"
+        title: Translation.tr("Home Assistant")
+
+        ConfigSwitch {
+            buttonIcon: "power_settings_new"
+            text: Translation.tr("Enable Home Assistant tab")
+            checked: Config.options.sidebar.homeAssistant.enable
+            onCheckedChanged: {
+                Config.options.sidebar.homeAssistant.enable = checked;
+            }
+        }
+
+        MaterialTextArea {
+            Layout.fillWidth: true
+            placeholderText: Translation.tr("Home Assistant URL (e.g. https://homeassistant.local)")
+            text: Config.options.sidebar.homeAssistant.url
+            wrapMode: TextEdit.Wrap
+            onTextChanged: {
+                Qt.callLater(() => {
+                    Config.options.sidebar.homeAssistant.url = text;
+                });
+            }
+        }
+
+        MaterialTextField {
+            Layout.fillWidth: true
+            placeholderText: Translation.tr("Long-lived access token")
+            text: Config.options.sidebar.homeAssistant.token
+            echoMode: TextInput.Password
+            onTextChanged: {
+                Qt.callLater(() => {
+                    Config.options.sidebar.homeAssistant.token = text;
+                });
+            }
+        }
+
+        ConfigSpinBox {
+            icon: "av_timer"
+            text: Translation.tr("Polling interval (ms)")
+            value: Config.options.sidebar.homeAssistant.pollInterval
+            from: 1000
+            to: 60000
+            stepSize: 1000
+            onValueChanged: {
+                Config.options.sidebar.homeAssistant.pollInterval = value;
+            }
+        }
+    }
+
+    ContentSection {
         icon: "weather_mix"
         title: Translation.tr("Weather")
         ConfigRow {

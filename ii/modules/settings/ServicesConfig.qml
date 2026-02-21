@@ -251,6 +251,33 @@ ContentPage {
                 Config.options.sidebar.homeAssistant.pollInterval = value;
             }
         }
+
+        ConfigSwitch {
+            buttonIcon: "brightness_medium"
+            text: Translation.tr("Show brightness slider on light cards")
+            checked: Config.options.sidebar.homeAssistant.showBrightness
+            onCheckedChanged: {
+                Config.options.sidebar.homeAssistant.showBrightness = checked;
+            }
+        }
+
+        ConfigSwitch {
+            buttonIcon: "palette"
+            text: Translation.tr("Show colour swatches on light cards")
+            checked: Config.options.sidebar.homeAssistant.showColor
+            onCheckedChanged: {
+                Config.options.sidebar.homeAssistant.showColor = checked;
+            }
+        }
+
+        ConfigSwitch {
+            buttonIcon: "videocam"
+            text: Translation.tr("Show camera feeds")
+            checked: Config.options.sidebar.homeAssistant.showCameras
+            onCheckedChanged: {
+                Config.options.sidebar.homeAssistant.showCameras = checked;
+            }
+        }
     }
 
     ContentSection {

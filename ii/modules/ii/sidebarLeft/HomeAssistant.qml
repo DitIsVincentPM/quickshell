@@ -3,6 +3,7 @@ import qs.modules.common.widgets
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtMultimedia
 import QtWebSockets
 
 /**
@@ -423,6 +424,21 @@ Item {
                 expires: 30
             }));
         }
+
+        /** Request an HLS/WebRTC stream URL for a camera entity. callback(result|null). */
+        function requestStream(entityId, callback) {
+            if (!haWs.wsReady) {
+                callback(null);
+                return;
+            }
+            var id = haWs.nextMsgId++;
+            haWs.pendingCallbacks[id] = callback;
+            haWs.sendTextMessage(JSON.stringify({
+                id: id,
+                type: "camera/stream",
+                entity_id: entityId
+            }));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -676,58 +692,99 @@ Item {
                             spacing: 4
                             visible: root.isEntityVisible(camDelegate.modelData.entity_id)
 
-                            // True whenever we have everything needed to load an image.
+                            // Stream mode state machine: "init" → "hls" | "mjpeg" | "snapshot"
+                            property string streamMode: "init"
+                            property url streamUrl: ""
+                            // True once at least one snapshot has rendered successfully —
+                            // used to suppress the "Loading…" overlay during subsequent polls
+                            // so the old frame stays visible while the next one loads.
+                            property bool hasEverLoaded: false
+
                             property bool shouldLoad: root.haToken.length > 0
                                 && root.isEntityVisible(camDelegate.modelData.entity_id)
 
-                            // Load (or reload) the camera image. Uses a HA WebSocket
-                            // signed-path token (?authSig=…) so the request is
-                            // authenticated without exposing the long-lived token in the
-                            // URL. Falls back to ?access_token= while the WS connects.
-                            function loadCameraImage() {
+                            // Prepend haUrl to relative paths returned by HA.
+                            function absoluteUrl(path) {
+                                if (path.charAt(0) === "/")
+                                    return root.haUrl.replace(/\/$/, "") + path;
+                                return path;
+                            }
+
+                            // Stage 1: try HLS via camera/stream WS command.
+                            function tryHls() {
+                                if (!camDelegate.shouldLoad) return;
+                                haWs.requestStream(camDelegate.modelData.entity_id, function(result) {
+                                    if (result && result.url) {
+                                        camDelegate.streamUrl = camDelegate.absoluteUrl(result.url);
+                                        camDelegate.streamMode = "hls";
+                                    } else {
+                                        camDelegate.tryMjpeg();
+                                    }
+                                });
+                            }
+
+                            // Stage 2: try MJPEG proxy stream.
+                            function tryMjpeg() {
+                                if (!camDelegate.shouldLoad) return;
+                                var entityId = camDelegate.modelData.entity_id;
+                                if (haWs.wsReady) {
+                                    haWs.signPath("/api/camera_proxy_stream/" + entityId, function(result) {
+                                        if (result && result.path) {
+                                            camDelegate.streamMode = "mjpeg";
+                                            camImage.source = camDelegate.absoluteUrl(result.path);
+                                        } else {
+                                            camDelegate.streamMode = "snapshot";
+                                            camDelegate.loadSnapshot();
+                                        }
+                                    });
+                                } else {
+                                    camDelegate.streamMode = "snapshot";
+                                    camDelegate.loadSnapshot();
+                                }
+                            }
+
+                            // Stage 3: snapshot polling fallback.
+                            function loadSnapshot() {
                                 if (!camDelegate.shouldLoad) return;
                                 var entityId = camDelegate.modelData.entity_id;
                                 if (haWs.wsReady) {
                                     haWs.signPath("/api/camera_proxy/" + entityId, function(result) {
                                         if (result && result.path) {
-                                            // Setting source to "" first forces QML to reload
-                                            // even when the new URL has the same base path.
-                                            camImage.source = "";
-                                            camImage.source = root.haUrl.replace(/\/$/, "") + result.path;
+                                            // Do NOT set source to "" first — the old frame
+                                            // stays visible while the new one loads.
+                                            camImage.source = camDelegate.absoluteUrl(result.path);
                                         } else {
-                                            // signPath failed; retry after interval
                                             cameraRefreshTimer.restart();
                                         }
                                     });
                                 } else {
-                                    // WS not yet ready – fall back to access_token query param.
-                                    // The Connections block below will upgrade to a signed URL
-                                    // once the WebSocket authenticates.
-                                    if (camImage.status !== Image.Loading) {
-                                        camImage.source = "";
+                                    if (camImage.status !== Image.Loading)
                                         camImage.source = root.cameraProxyUrl(entityId);
-                                    }
                                 }
                             }
 
-                            Component.onCompleted: camDelegate.loadCameraImage()
-
-                            onShouldLoadChanged: {
-                                if (camDelegate.shouldLoad) camDelegate.loadCameraImage();
+                            Component.onCompleted: {
+                                if (camDelegate.shouldLoad) camDelegate.tryHls();
                             }
 
-                            // When WS becomes ready, reload so we switch from the
-                            // access_token fallback to a proper signed URL.
+                            onShouldLoadChanged: {
+                                if (camDelegate.shouldLoad && camDelegate.streamMode === "init")
+                                    camDelegate.tryHls();
+                            }
+
+                            // When WS reconnects, restart from the top so we can upgrade
+                            // from snapshot/MJPEG to HLS if the camera now supports it.
                             Connections {
                                 target: haWs
                                 function onWsReadyChanged() {
                                     if (haWs.wsReady) {
-                                        // Upgrade to signed URL regardless of current status;
-                                        // only skip if a load is already in progress to avoid
-                                        // cancelling the ongoing request.
-                                        if (camImage.status !== Image.Loading) {
-                                            camDelegate.loadCameraImage();
-                                        }
+                                        // Stop any active stream before switching modes so we
+                                        // don't leave orphaned decoders consuming resources.
+                                        camVideo.stop();
+                                        if (camDelegate.streamMode === "mjpeg")
+                                            camImage.source = "";
+                                        camDelegate.streamMode = "init";
+                                        camDelegate.tryHls();
                                     }
                                 }
                             }
@@ -745,46 +802,89 @@ Item {
                                 color: Appearance.colors.colLayer2
                                 clip: true
 
+                                // HLS video — visible only in hls mode.
+                                Video {
+                                    id: camVideo
+                                    anchors.fill: parent
+                                    source: camDelegate.streamMode === "hls" ? camDelegate.streamUrl : ""
+                                    visible: camDelegate.streamMode === "hls"
+                                    fillMode: VideoOutput.PreserveAspectCrop
+                                    autoPlay: true
+                                    onErrorOccurred: function(error, errorString) {
+                                        if (camDelegate.streamMode === "hls") {
+                                            camDelegate.tryMjpeg();
+                                        }
+                                    }
+                                }
+
+                                // Still image / MJPEG — visible in mjpeg and snapshot modes.
                                 Image {
                                     id: camImage
                                     anchors.fill: parent
                                     fillMode: Image.PreserveAspectCrop
                                     cache: false
                                     asynchronous: true
+                                    visible: camDelegate.streamMode === "mjpeg"
+                                        || camDelegate.streamMode === "snapshot"
 
-                                    // After each load (success or failure) wait
-                                    // cameraPollInterval ms before the next one. This
-                                    // one-shot pattern prevents the previous approach
-                                    // where a repeat timer would cancel slow in-progress
-                                    // requests (Tuya cameras can take several seconds).
                                     onStatusChanged: {
-                                        if ((status === Image.Ready || status === Image.Error)
-                                                && camDelegate.shouldLoad) {
-                                            cameraRefreshTimer.restart();
+                                        if (status === Image.Ready) {
+                                            camDelegate.hasEverLoaded = true;
+                                            if (camDelegate.streamMode === "snapshot"
+                                                    && camDelegate.shouldLoad)
+                                                cameraRefreshTimer.restart();
+                                        } else if (status === Image.Error) {
+                                            if (camDelegate.streamMode === "mjpeg") {
+                                                // MJPEG unsupported — fall back to snapshot polling.
+                                                camDelegate.streamMode = "snapshot";
+                                                camDelegate.loadSnapshot();
+                                            } else if (camDelegate.streamMode === "snapshot"
+                                                    && camDelegate.shouldLoad) {
+                                                cameraRefreshTimer.restart();
+                                            }
                                         }
                                     }
                                 }
 
                                 StyledText {
                                     anchors.centerIn: parent
-                                    visible: camImage.status !== Image.Ready
-                                    text: camImage.status === Image.Loading
-                                        ? qsTr("Loading…")
-                                        : camDelegate.modelData.state === "unavailable"
-                                            ? qsTr("Offline")
-                                            : qsTr("No feed")
+                                    visible: {
+                                        if (camDelegate.modelData.state === "unavailable") return true;
+                                        if (camDelegate.streamMode === "init") return true;
+                                        if (camDelegate.streamMode === "hls")
+                                            return camVideo.playbackState !== MediaPlayer.PlayingState;
+                                        if (camDelegate.streamMode === "mjpeg")
+                                            return camImage.status !== Image.Ready;
+                                        // snapshot: suppress overlay after first success so the
+                                        // old frame is visible while the next one loads.
+                                        return !camDelegate.hasEverLoaded
+                                            && camImage.status !== Image.Ready;
+                                    }
+                                    text: {
+                                        if (camDelegate.modelData.state === "unavailable")
+                                            return qsTr("Offline");
+                                        if (camDelegate.streamMode === "init")
+                                            return qsTr("Connecting…");
+                                        if (camDelegate.streamMode === "hls")
+                                            return qsTr("Buffering…");
+                                        if (camImage.status === Image.Loading)
+                                            return qsTr("Loading…");
+                                        return qsTr("No feed");
+                                    }
                                     color: Appearance.colors.colSubtext
                                 }
                             }
 
-                            // One-shot timer: fires cameraPollInterval ms after the
-                            // previous load completes, never during an active request.
+                            // One-shot poll timer — only active in snapshot fallback mode.
                             Timer {
                                 id: cameraRefreshTimer
                                 interval: Config.options.sidebar.homeAssistant.cameraPollInterval
                                 running: false
                                 repeat: false
-                                onTriggered: camDelegate.loadCameraImage()
+                                onTriggered: {
+                                    if (camDelegate.streamMode === "snapshot")
+                                        camDelegate.loadSnapshot();
+                                }
                             }
                         }
                     }

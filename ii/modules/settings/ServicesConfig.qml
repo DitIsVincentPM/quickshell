@@ -278,6 +278,15 @@ ContentPage {
                 Config.options.sidebar.homeAssistant.showCameras = checked;
             }
         }
+
+        ConfigSwitch {
+            buttonIcon: "thermostat"
+            text: Translation.tr("Show climate/heater cards")
+            checked: Config.options.sidebar.homeAssistant.showClimate
+            onCheckedChanged: {
+                Config.options.sidebar.homeAssistant.showClimate = checked;
+            }
+        }
     }
 
     ContentSection {
